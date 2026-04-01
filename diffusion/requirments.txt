@@ -1,0 +1,46 @@
+# ==========================================
+# 核心模型框架與生態系 (Hugging Face Ecosystem)
+# ==========================================
+diffusers>=0.21.0        # Diffusion 模型核心
+transformers>=4.33.0     # LLM 與各類 Transformer 架構核心
+accelerate>=0.23.0       # 多卡與分散式訓練管理
+peft                     # 參數高效微調 (如 LoRA, QLoRA)，未來微調大模型必備
+timm                     # PyTorch Image Models，提供最全的 SOTA 視覺模型庫
+
+# ==========================================
+# 高效能訓練與擴展 (HPC & Scaling)
+# ==========================================
+deepspeed                # 微軟的 DeepSpeed，訓練超大模型 (LLM) 必備
+bitsandbytes             # 模型量化工具 (8-bit/4-bit)，節省 VRAM
+einops                   # 高效且具可讀性的 Tensor 形狀操作工具
+
+# ==========================================
+# 資料處理與加載 (Data Processing)
+# ==========================================
+datasets                 # Hugging Face 高效資料集管理工具
+webdataset               # 處理 PB 級超大資料集的標準格式 (解決 HPC 小檔案 I/O 瓶頸)
+pandas                   # 數據分析與表格處理
+numpy                    # 基礎數值運算
+scipy                    # 科學運算
+
+# ==========================================
+# 影像處理 (Computer Vision)
+# ==========================================
+pillow                   # 基礎影像處理
+opencv-python-headless   # OpenCV (使用 headless 版本以避免 Docker 缺少 libGL 等 UI 依賴)
+albumentations           # 效能極高的影像資料擴增 (Data Augmentation) 套件
+
+# ==========================================
+# 實驗追蹤與評估 (Tracking & Metrics)
+# ==========================================
+wandb                    # Weights & Biases：業界標準的實驗追蹤與視覺化平台
+tensorboard              # 經典的訓練指標視覺化工具
+torchmetrics             # PyTorch 官方的高效評估指標庫
+evaluate                 # Hugging Face 模型評估工具
+tqdm                     # 終端機進度條
+
+# ==========================================
+# 實用工具
+# ==========================================
+omegaconf                # 強大的 YAML 設定檔管理工具
+safetensors              # 更安全、更快速的模型權重存取格式
