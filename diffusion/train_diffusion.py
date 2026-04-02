@@ -41,10 +41,10 @@ def main():
     # H200 架構優化：開啟 TF32 加速矩陣運算
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
-        if torch.cuda.is_available():
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            print(" H200 優化：已啟用 TensorFloat-32 (TF32)")
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print(" H200 優化：已啟用 TensorFloat-32 (TF32)")
 
     # 2. 資料集與 DataLoader 準備
     # 使用標準的影像前處理：縮放、中心裁切、轉為 Tensor、正規化至 [-1, 1] (符合 DDPM 標準)
@@ -82,6 +82,8 @@ def main():
             "UpBlock2D", "AttnUpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D"
         ),
     )
+    model.to(accelerator.device) # 先放到設備上
+    model = torch.compile(model, mode="reduce-overhead")
     
     # DDPM 雜訊排程器
     noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
@@ -97,55 +99,61 @@ def main():
 
     # 5. 讓 Accelerate 接管所有 PyTorch 物件
     # 這是最關鍵的一步：它會自動把 model 丟到對應的 H200 上，並配置分散式通訊
-    model, optimizer, dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, dataloader, lr_scheduler
+    # 1. 先 Prepare Model, Optimizer, DataLoader
+    model, optimizer, dataloader = accelerator.prepare(
+        model, optimizer, dataloader
     )
+    
+    # 2. 這時候的 len(dataloader) 才是真正分發到單卡後的步數
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=args.lr_warmup_steps,
+        num_training_steps=(len(dataloader) * args.epochs)
+    )
+    
+    # 3. 再單獨 Prepare Scheduler
+    lr_scheduler = accelerator.prepare(lr_scheduler)
 
     # 6. 開始訓練迴圈
     global_step = 0
+    # 新增：用來記錄歷史最低 Loss
+    best_loss = float("inf") 
+
     if accelerator.is_main_process:
-        print(f" 開始訓練，總 Epoch 數: {args.epochs}，單卡 Batch Size: {args.batch_size}")
+        print(f"🔥 開始訓練，總 Epoch 數: {args.epochs}，單卡 Batch Size: {args.batch_size}")
 
     for epoch in range(args.epochs):
         model.train()
         progress_bar = tqdm(total=len(dataloader), disable=not accelerator.is_local_main_process)
         progress_bar.set_description(f"Epoch {epoch+1}")
         
+        # 新增：用來計算這個 Epoch 的總 Loss
+        epoch_total_loss = 0.0 
+        
         for step, batch in enumerate(dataloader):
-            # batch 包含 (images, labels)，我們只取 images
             clean_images = batch[0]
-            
-            # (a) 為圖片隨機採樣雜訊
             noise = torch.randn(clean_images.shape, device=clean_images.device)
             bsz = clean_images.shape[0]
-            
-            # (b) 為每個 batch 隨機採樣一個時間步 (timestep)
             timesteps = torch.randint(
                 0, noise_scheduler.config.num_train_timesteps, (bsz,), device=clean_images.device
             ).long()
             
-            # (c) 根據時間步將雜訊加入乾淨的圖片 (Forward process)
             noisy_images = noise_scheduler.add_noise(clean_images, noise, timesteps)
             
-            # (d) 預測雜訊
             with accelerator.accumulate(model):
-                # 預測圖片中加入的雜訊殘差
                 noise_pred = model(noisy_images, timesteps, return_dict=False)[0]
-                
-                # 計算損失 (MSE)
                 loss = F.mse_loss(noise_pred, noise)
-                
-                # 反向傳播
                 accelerator.backward(loss)
                 
-                # 梯度裁切防爆與參數更新
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
             
-            # 更新進度條
+            # 累加 Loss
+            epoch_total_loss += loss.detach().item()
+
             progress_bar.update(1)
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
@@ -153,15 +161,27 @@ def main():
             
         progress_bar.close()
 
-        # 7. 定期儲存模型 (僅由主進程負責，避免多卡覆寫)
+        # 新增：計算該 Epoch 的平均 Loss
+        avg_epoch_loss = epoch_total_loss / len(dataloader)
+
+        # 7. 儲存模型 (Last 與 Best 策略)
+        accelerator.wait_for_everyone() # 確保所有 GPU 都跑到這裡才存檔
+        
         if accelerator.is_main_process:
-            if (epoch + 1) % args.save_model_epochs == 0 or (epoch + 1) == args.epochs:
-                save_path = os.path.join(args.output_dir, f"epoch_{epoch+1}")
-                # 將包裹在 accelerator 中的模型還原，並打包成 Pipeline 儲存
-                unwrap_model = accelerator.unwrap_model(model)
-                pipeline = DDPMPipeline(unet=unwrap_model, scheduler=noise_scheduler)
-                pipeline.save_pretrained(save_path)
-                print(f" 模型已儲存至: {save_path}")
+            unwrap_model = accelerator.unwrap_model(model)
+            pipeline = DDPMPipeline(unet=unwrap_model, scheduler=noise_scheduler)
+            
+            # (A) 永遠覆寫儲存「最新」的模型 (last)
+            last_save_path = os.path.join(args.output_dir, "last_model")
+            pipeline.save_pretrained(last_save_path)
+            print(f"✅ Epoch {epoch+1} 結束，已覆寫 last_model (Avg Loss: {avg_epoch_loss:.5f})")
+
+            # (B) 判斷是否為「最佳」模型 (best)
+            if avg_epoch_loss < best_loss:
+                best_loss = avg_epoch_loss
+                best_save_path = os.path.join(args.output_dir, "best_model")
+                pipeline.save_pretrained(best_save_path)
+                print(f"🏆 發現更低的 Loss ({best_loss:.5f})！已更新 best_model")
 
     if accelerator.is_main_process:
         print(" 訓練管線執行完畢！")
