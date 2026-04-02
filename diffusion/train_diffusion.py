@@ -35,7 +35,8 @@ def main():
     # 1. 初始化 Accelerator (負責處理多卡、混合精度與設備擺放)
     accelerator = Accelerator(
         mixed_precision=args.mixed_precision,
-        gradient_accumulation_steps=1
+        gradient_accumulation_steps=1,
+        log_with="wandb" # 新增這行
     )
     
     # H200 架構優化：開啟 TF32 加速矩陣運算
@@ -66,6 +67,7 @@ def main():
     
     if accelerator.is_main_process:
         print(f"📂 成功載入資料集：共 {len(dataset)} 張圖片")
+        accelerator.init_trackers(project_name="my-diffusion-model")
 
     # 3. 初始化模型與排程器 (Scheduler)
     # 這裡建立一個標準的 UNet 結構
@@ -125,7 +127,7 @@ def main():
     for epoch in range(args.epochs):
         model.train()
         progress_bar = tqdm(total=len(dataloader), disable=not accelerator.is_local_main_process)
-        progress_bar.set_description(f"Epoch {epoch+1}")
+        accelerator.log({"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}, step=global_step)
         
         # 新增：用來計算這個 Epoch 的總 Loss
         epoch_total_loss = 0.0 
