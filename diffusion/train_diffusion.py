@@ -10,7 +10,7 @@ import pyarrow as pa  # 確保 pyarrow 有安裝
 import pyarrow.dataset as ds
 
 # 引入 Hugging Face 核心套件
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from diffusers import UNet2DModel, DDPMScheduler, DDPMPipeline
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from accelerate import Accelerator
@@ -48,24 +48,37 @@ def main():
 
     # 核心修正：正確載入碎片化的 Arrow 檔案
     if accelerator.is_main_process:
-        print(f"📂 正在掃描 Arrow 碎片於: {args.data_dir}")
+        print(f"📂 使用官方 load_dataset 載入 Arrow 碎片 (安全省 RAM 模式)...")
 
-    arrow_dataset = ds.dataset(args.data_dir, format="arrow")
+    # 1. 精確抓出所有的 .arrow 檔案，徹底避開 .json 和 .lock 檔
+    arrow_files = sorted(glob.glob(os.path.join(args.data_dir, "imagenet-1k-train-*.arrow")))
+    
+    if not arrow_files:
+        raise FileNotFoundError(f"在 {args.data_dir} 找不到任何 imagenet-1k-train-*.arrow 檔案！")
 
+    # 2. 這是 HF 官方的標準讀取法：自動處理 Schema，自動使用 Zero-copy 記憶體映射
+    dataset = load_dataset("arrow", data_files=arrow_files, split="train")
+    
+    # 3. 定義影像前處理轉換
     def transform_fn(examples):
-        # ImageNet Arrow 結構中，圖片通常存放在 'image' 欄位的 'bytes' 或直接是 PIL 物件
-        # 這裡根據官方 Dataset Card 使用 map 處理
         images = [data_transforms(img.convert("RGB")) for img in examples["image"]]
         return {"input": images}
 
+    # 4. 懶加載轉換 (用到時才算)
     dataset = dataset.with_transform(transform_fn)
 
+    # 5. 設定 DataLoader
     def collate_fn(examples):
-        return (torch.stack([e["input"] for e in examples]),)
+        pixel_values = torch.stack([example["input"] for example in examples])
+        return (pixel_values,)
 
     dataloader = DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=True, 
-        num_workers=args.num_workers, collate_fn=collate_fn, pin_memory=True
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=True, 
+        num_workers=args.num_workers,
+        collate_fn=collate_fn,
+        pin_memory=True
     )
 
     # 2. 模型初始化 (UNet)
