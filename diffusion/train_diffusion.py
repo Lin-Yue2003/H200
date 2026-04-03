@@ -67,7 +67,6 @@ def main():
     
     if accelerator.is_main_process:
         print(f"📂 成功載入資料集：共 {len(dataset)} 張圖片")
-        accelerator.init_trackers(project_name="my-diffusion-model")
 
     # 3. 初始化模型與排程器 (Scheduler)
     # 這裡建立一個標準的 UNet 結構
@@ -85,7 +84,7 @@ def main():
         ),
     )
     model.to(accelerator.device) # 先放到設備上
-    model = torch.compile(model, mode="reduce-overhead")
+    
     
     # DDPM 雜訊排程器
     noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
@@ -93,11 +92,6 @@ def main():
     # 4. 初始化優化器與學習率排程器
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     
-    lr_scheduler = get_cosine_schedule_with_warmup(
-        optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps,
-        num_training_steps=(len(dataloader) * args.epochs)
-    )
 
     # 5. 讓 Accelerate 接管所有 PyTorch 物件
     # 這是最關鍵的一步：它會自動把 model 丟到對應的 H200 上，並配置分散式通訊
@@ -105,6 +99,8 @@ def main():
     model, optimizer, dataloader = accelerator.prepare(
         model, optimizer, dataloader
     )
+
+    model = torch.compile(model, mode="reduce-overhead")
     
     # 2. 這時候的 len(dataloader) 才是真正分發到單卡後的步數
     lr_scheduler = get_cosine_schedule_with_warmup(
@@ -123,12 +119,15 @@ def main():
 
     if accelerator.is_main_process:
         print(f"🔥 開始訓練，總 Epoch 數: {args.epochs}，單卡 Batch Size: {args.batch_size}")
-
+        accelerator.init_trackers(
+                    project_name="h200-diffusion-training", # 你的 W&B 專案名稱 (可自訂)
+                    config=vars(args) # 自動記錄所有 argparse 參數！
+                )
+    
     for epoch in range(args.epochs):
         model.train()
-        progress_bar = tqdm(total=len(dataloader), disable=not accelerator.is_local_main_process)
-        accelerator.log({"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}, step=global_step)
-        
+        progress_bar = tqdm(total=len(dataloader), disable=not accelerator.is_local_main_process)   
+        progress_bar.set_description(f"Epoch {epoch+1}")
         # 新增：用來計算這個 Epoch 的總 Loss
         epoch_total_loss = 0.0 
         
@@ -157,8 +156,14 @@ def main():
             epoch_total_loss += loss.detach().item()
 
             progress_bar.update(1)
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {
+                "loss": loss.detach().item(), 
+                "lr": lr_scheduler.get_last_lr()[0],
+                "best": best_loss if best_loss != float("inf") else "N/A"
+            }
             progress_bar.set_postfix(**logs)
+            # 🟢 新增這行：把數據推送到 W&B 雲端
+            accelerator.log(logs, step=global_step)
             global_step += 1
             
         progress_bar.close()
@@ -187,6 +192,7 @@ def main():
 
     if accelerator.is_main_process:
         print(" 訓練管線執行完畢！")
+        accelerator.end_training()
 
 if __name__ == "__main__":
     main()
