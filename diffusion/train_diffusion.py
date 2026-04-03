@@ -7,6 +7,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import pyarrow as pa  # 確保 pyarrow 有安裝
+import pyarrow.dataset as ds
 
 # 引入 Hugging Face 核心套件
 from datasets import Dataset
@@ -49,13 +50,7 @@ def main():
     if accelerator.is_main_process:
         print(f"📂 正在掃描 Arrow 碎片於: {args.data_dir}")
 
-    arrow_files = sorted(glob.glob(os.path.join(args.data_dir, "imagenet-1k-train-*.arrow")))
-    if not arrow_files:
-        raise FileNotFoundError(f"找不到任何 train arrow 檔案於 {args.data_dir}")
-
-    # 使用 pyarrow 讀取多個檔案並拼接
-    tables = [pa.ipc.open_stream(f).read_all() for f in arrow_files]
-    dataset = Dataset(pa.concat_tables(tables))
+    arrow_dataset = ds.dataset(args.data_dir, format="arrow")
 
     def transform_fn(examples):
         # ImageNet Arrow 結構中，圖片通常存放在 'image' 欄位的 'bytes' 或直接是 PIL 物件
