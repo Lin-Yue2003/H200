@@ -3,7 +3,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 from torchvision import transforms
-from torchvision.datasets import ImageFolder
+from torchvision.datasets import ImageFolder, load_from_disk
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -56,17 +56,35 @@ def main():
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
     
-    dataset = ImageFolder(root=args.data_dir, transform=data_transforms)
+    # --- 原本的 ImageFolder 刪掉，換成這個 ---
+    if accelerator.is_main_process:
+        print(f"📂 正在從 Arrow 格式載入資料集...")
+    
+    # 載入 Arrow 資料集 (指向你那個包含大量 .arrow 的資料夾)
+    raw_dataset = load_from_disk(args.data_dir)
+    
+    # 定義轉換函數 (因為 Arrow 裡面的圖片是 PIL 物件)
+    def transform_fn(examples):
+        images = [data_transforms(image.convert("RGB")) for image in examples["image"]]
+        return {"input": images}
+
+    # 設定轉換邏輯 (這不會立刻執行，而是在 DataLoader 讀取時才動態轉換)
+    dataset = raw_dataset["train"].with_transform(transform_fn)
+
+    # 修改 DataLoader 的取樣方式 (因為 datasets 格式結構稍微不同)
+    def collate_fn(examples):
+        pixel_values = torch.stack([example["input"] for example in examples])
+        return (pixel_values,) # 回傳 Tuple 保持跟原本程式碼相容
+
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
         shuffle=True, 
         num_workers=args.num_workers,
-        pin_memory=True # 加速 CPU 到 GPU 的記憶體傳輸
+        collate_fn=collate_fn,
+        pin_memory=True
     )
-    
-    if accelerator.is_main_process:
-        print(f"📂 成功載入資料集：共 {len(dataset)} 張圖片")
+    # ---------------------------------------
 
     # 3. 初始化模型與排程器 (Scheduler)
     # 這裡建立一個標準的 UNet 結構
