@@ -5,6 +5,8 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
 from datasets import load_from_disk
+import glob # 記得在最上面補這行
+from datasets import Dataset
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -57,20 +59,26 @@ def main():
         transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
     ])
     
-    # --- 原本的 ImageFolder 刪掉，換成這個 ---
     if accelerator.is_main_process:
-        print(f"📂 正在從 Arrow 格式載入資料集...")
+        print(f"📂 正在從原始 Arrow 檔案直接載入...")
+
+    # 找出該路徑下所有的 train arrow 檔案
+    arrow_files = glob.glob(os.path.join(args.data_dir, "imagenet-1k-train-*.arrow"))
+    arrow_files.sort() # 確保順序一致
     
-    # 載入 Arrow 資料集 (指向你那個包含大量 .arrow 的資料夾)
-    raw_dataset = load_from_disk(args.data_dir)
+    if not arrow_files:
+        raise FileNotFoundError(f"在 {args.data_dir} 找不到任何 imagenet-1k-train-*.arrow 檔案！")
+
+    # 直接從 arrow 檔案清單建立 Dataset
+    dataset = Dataset.from_file(arrow_files)
     
-    # 定義轉換函數 (因為 Arrow 裡面的圖片是 PIL 物件)
+    # 定義轉換 (這部分保持不變)
     def transform_fn(examples):
+        # 這裡要注意：Arrow 裡的 key 可能叫 'image'，如果不是，請根據你檔案內容調整
         images = [data_transforms(image.convert("RGB")) for image in examples["image"]]
         return {"input": images}
 
-    # 設定轉換邏輯 (這不會立刻執行，而是在 DataLoader 讀取時才動態轉換)
-    dataset = raw_dataset["train"].with_transform(transform_fn)
+    dataset = dataset.with_transform(transform_fn)
 
     # 修改 DataLoader 的取樣方式 (因為 datasets 格式結構稍微不同)
     def collate_fn(examples):
