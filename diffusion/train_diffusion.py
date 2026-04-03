@@ -3,7 +3,8 @@ import argparse
 import torch
 import torch.nn.functional as F
 from torchvision import transforms
-from torchvision.datasets import ImageFolder, load_from_disk
+from torchvision.datasets import ImageFolder
+from datasets import load_from_disk
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
